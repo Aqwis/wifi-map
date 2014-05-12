@@ -3,10 +3,15 @@ import subprocess
 import time
 import os
 import signal
+import json
 
+from statistics import mean, median
 from itertools import *
 from math import log, log10, pow
 from timeit import default_timer as timer
+from urllib.request import urlopen
+
+vendor_cache = {}
 
 class Client(object):
     def __init__(self, mac, power):
@@ -15,11 +20,22 @@ class Client(object):
         self.timestamp = time.clock()
 
     def __str__(self):
-        return "%s, %d: %.2f meter" % (self.mac, self.power, self.distance)
+        return "%s (%s), %d: %.2f meter" % (self.mac, self.vendor, self.power, self.distance)
 
     @property
     def distance(self):
         return calculate_wifi_distance(self.power, 2462)
+
+    @property
+    def vendor(self):
+        if not self.mac in vendor_cache:
+            raw_json = str(urlopen("http://www.macvendorlookup.com/api/v2/" + self.mac).read())[2:-1]
+            info = json.loads(raw_json)
+            company = info[0]["company"]
+            vendor_cache[self.mac] = company
+        else:
+            company = vendor_cache[self.mac]
+        return company
 
 def calculate_wifi_distance(strength, freq):
     # http://rvmiller.com/2013/05/part-1-wifi-based-trilateration-on-android/
@@ -35,7 +51,6 @@ def extract_client_info(output):
     for i, line in reversed(list(enumerate(lines))):
         if "RTS_RX" in line:
             output = "\n".join(lines[i:previous_i-4])
-            print(output)
             frames.append(get_info_from_frame(output))
             previous_i = i
     return merge_frames(frames)
@@ -51,9 +66,10 @@ def merge_frames(frames):
     merged = []
     for group in grouped:
         MAC = group[0].mac
-        power_list = map(lambda f: f.power, group)
+        power_list = list(map(lambda f: f.power, group))
         max_power = max(power_list)
-        merged.append(Client(MAC, max_power))
+        mean_power = median(power_list)
+        merged.append(Client(MAC, mean_power))
 
     return merged
 
@@ -70,19 +86,22 @@ def get_info_from_frame(frame):
         info.append(Client(c_info[0], int(c_info[2])))
     return info
 
+def fetch_data(timeout=10):
+    proc = subprocess.Popen(['airodump-ng', '-c 11', 'mon0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setsid, universal_newlines=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGTERM)
+        out, err = proc.communicate()
+    return err
+
 def find_all_distances():
-    ACTUALLY_GET_DATA = True
+    ACTUALLY_GET_DATA = False
 
     client_dict = {}
 
     if ACTUALLY_GET_DATA:
-        proc = subprocess.Popen(['airodump-ng', '-c 11', 'mon0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setsid, universal_newlines=True)
-        try:
-            out, err = proc.communicate(timeout=20)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGTERM)
-            out, err = proc.communicate()
-        output = err
+        output = fetch_data(timeout=20)
         with open("test.txt", "w") as f:
             f.write(output)
     else:
@@ -95,8 +114,8 @@ def find_all_distances():
     print("-----------")
 
 def main():
-    for _ in range(15):
+    for _ in range(8):
         find_all_distances()
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
