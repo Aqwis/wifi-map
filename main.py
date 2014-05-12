@@ -4,6 +4,7 @@ import time
 import os
 import signal
 
+from itertools import *
 from math import log, log10, pow
 from timeit import default_timer as timer
 
@@ -18,33 +19,43 @@ class Client(object):
 
     @property
     def distance(self):
-        return calculate_wifi_distance(self.power, 2400)
+        return calculate_wifi_distance(self.power, 2462)
 
 def calculate_wifi_distance(strength, freq):
-    exp = (27.55 - (20*log10(freq)) - strength)/20.0;
+    # http://rvmiller.com/2013/05/part-1-wifi-based-trilateration-on-android/
+    exp = (27.55 - (20*log10(freq)) + abs(strength))/20.0;
     return pow(10.0, exp)
-
-def find_distance():
-    strength = input("Styrke: ")
-    freq = raw_input("Frekvens (standard er 2400): ")
-    if not freq:
-        freq = 2400
-    else:
-        freq = eval(freq)
-    print(calculate_wifi_distance(strength, freq))
 
 def extract_client_info(output):
     """Extracts MAC and power for each client
     from airodump-ng output."""
     frames = []
+    lines = output.splitlines()
     previous_i = -1
-    for i, line in reversed(list(enumerate(output.splitlines()))):
+    for i, line in reversed(list(enumerate(lines))):
         if "RTS_RX" in line:
-            output = "\n".join(output.splitlines()[i:previous_i])
-            frames.append(output)
+            output = "\n".join(lines[i:previous_i-4])
+            print(output)
+            frames.append(get_info_from_frame(output))
             previous_i = i
-    print(frames[1])
-    return get_info_from_frame(frames[0])
+    return merge_frames(frames)
+
+def merge_frames(frames):
+    """Helper function for extract_client_info() that
+    merges client data from all the captured frames into
+    one client data object for each MAC address, with
+    power equal to the highest power found in the frames."""
+    flattened = sorted(chain.from_iterable(frames), key=lambda f: f.mac) # flatten the clients into one list and sort for grouping
+    grouped = [list(g[1]) for g in groupby(flattened, lambda f: f.mac)] # group clients by MAC
+
+    merged = []
+    for group in grouped:
+        MAC = group[0].mac
+        power_list = map(lambda f: f.power, group)
+        max_power = max(power_list)
+        merged.append(Client(MAC, max_power))
+
+    return merged
 
 def get_info_from_frame(frame):
     """Extracts MAC and power from a single frame."""
@@ -65,9 +76,9 @@ def find_all_distances():
     client_dict = {}
 
     if ACTUALLY_GET_DATA:
-        proc = subprocess.Popen(['airodump-ng', 'mon0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setsid, universal_newlines=True)
+        proc = subprocess.Popen(['airodump-ng', '-c 11', 'mon0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setsid, universal_newlines=True)
         try:
-            out, err = proc.communicate(timeout=5)
+            out, err = proc.communicate(timeout=20)
         except subprocess.TimeoutExpired:
             os.killpg(proc.pid, signal.SIGTERM)
             out, err = proc.communicate()
@@ -81,9 +92,11 @@ def find_all_distances():
     clients = extract_client_info(output)
     for client in clients:
         print(client)
+    print("-----------")
 
 def main():
-    find_all_distances()
+    for _ in range(15):
+        find_all_distances()
 
 if __name__=="__main__":
     main()
